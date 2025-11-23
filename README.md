@@ -1,0 +1,2 @@
+# ammo-check
+show ammo
