@@ -1,0 +1,116 @@
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform>AnyCPU</Platform>
+    <ProjectGuid>{5C3C3B1B-1A44-4C4A-9E7E-7EE7A0E2C9E1}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>ammocrosshairhud</RootNamespace>
+    <AssemblyName>ammocrosshairhud</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+    <LangVersion>7.3</LangVersion>
+    <Optimize>true</Optimize>
+
+    <!-- 컴파일 결과 DLL 나오는 위치 (원하면 바꿔도 됨) -->
+    <OutputPath>bin\</OutputPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+
+  <!-- Duckov / Unity DLL 참조 (경로 안 맞으면 네 PC 경로에 맞게 수정) -->
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="UnityEngine">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  <!-- 🔥 여기 새로 추가 -->
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+<!-- 🔹 여기 새로 추가: IMGUIModule (GUI / OnGUI용) -->
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>   
+   <!-- 🔥 여기까지 -->
+	    <Reference Include="TeamSoda.Duckov.Core">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\TeamSoda.Duckov.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+<!-- FMOD (AudioManager.PostCustomSFX에서 EventInstance 타입을 씀) -->
+    <Reference Include="FMODUnity">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\FMODUnity.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+<Reference Include="UnityEngine.ImageConversionModule">
+  <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.ImageConversionModule.dll</HintPath>
+  <Private>false</Private>
+</Reference>
+
+<Reference Include="UnityEngine.UnityWebRequestWWWModule">
+  <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.UnityWebRequestWWWModule.dll</HintPath>
+  <Private>false</Private>
+</Reference>
+ <Reference Include="UnityEngine.IMGUIModule">
+    <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Escape from Duckov\Duckov_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+  </Reference>
+
+ <!-- ★ 요거 추가 -->
+    <Reference Include="ItemStatsSystem">
+      <HintPath>$(ManagedDir)\ItemStatsSystem.dll</HintPath>
+    </Reference>
+
+    <Reference Include="Duckov">
+      <HintPath>$(ManagedDir)\Duckov.dll</HintPath>
+    </Reference>
+
+    <Reference Include="TeamSoda.Duckov.Core">
+      <HintPath>$(ManagedDir)\TeamSoda.Duckov.Core.dll</HintPath>
+    </Reference>
+    <Reference Include="TeamSoda.Duckov.Utilities">
+      <HintPath>$(ManagedDir)\TeamSoda.Duckov.Utilities.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+
+ 
+
+
+  <ItemGroup>
+    <Compile Include="ammocrosshairhud.cs" />
+  </ItemGroup>
+
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
