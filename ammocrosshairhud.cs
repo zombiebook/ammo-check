@@ -1,26 +1,35 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
+using ItemStatsSystem;
 using UnityEngine;
-using Duckov;
 
 namespace ammocrosshairhud
 {
+    // Duckov 모드 로더가 찾는 엔트리 타입
     public class ModBehaviour : Duckov.Modding.ModBehaviour
     {
         protected override void OnAfterSetup()
         {
             try
             {
-                GameObject root = new GameObject("AmmoCrosshairHUDRoot");
+                Debug.Log("[AmmoCrosshairHUD] ModBehaviour.OnAfterSetup - HUD 매니저 생성");
+
+                GameObject root = new GameObject("AmmoCrosshairHUDRoot_UI");
                 UnityEngine.Object.DontDestroyOnLoad(root);
                 root.AddComponent<AmmoCrosshairHUDManager>();
-                Debug.Log("[AmmoCrosshairHUD] OnAfterSetup - HUD 초기화 완료");
             }
             catch (Exception ex)
             {
-                Debug.Log("[AmmoCrosshairHUD] OnAfterSetup 예외: " + ex);
+                Debug.Log("[AmmoCrosshairHUD] ModBehaviour.OnAfterSetup 예외: " + ex);
             }
+        }
+
+        protected override void OnBeforeDeactivate()
+        {
+            Debug.Log("[AmmoCrosshairHUD] ModBehaviour.OnBeforeDeactivate - 언로드");
         }
     }
 
@@ -28,36 +37,77 @@ namespace ammocrosshairhud
     {
         private static AmmoCrosshairHUDManager _instance;
 
-        // CharacterMainControl → agentHolder → CurrentHoldGun
+        // ─────────────────────────────────────────────
+        // CharacterMainControl 리플렉션
+        // ─────────────────────────────────────────────
+        private Type _characterMainType;
+        private PropertyInfo _characterMainSingletonProp;
+
+        // agentHolder / 현재 총
         private bool _holderReflectionCached;
         private FieldInfo _agentHolderField;
         private PropertyInfo _agentHolderProp;
         private MemberInfo _currentHoldGunMember;
 
-        // 총 내부 (Item / ItemSetting_Gun)
+        // ─────────────────────────────────────────────
+        // 총 내부 (ItemSetting_Gun)
+        // ─────────────────────────────────────────────
         private bool _ammoReflectionCached;
-        private PropertyInfo _gunItemProp;        // gun.Item
-        private MethodInfo _getComponentMethod;   // item.GetComponent<ItemSetting_Gun>()
-        private Type _itemSettingGunType;         // ItemSetting_Gun
-        private FieldInfo _bulletCountField;      // _bulletCountCache
-        private PropertyInfo _targetBulletIdProp; // TargetBulletID
+        private PropertyInfo _gunItemProp;
+        private MethodInfo _getComponentMethod;
+        private Type _itemSettingGunType;
+        private FieldInfo _bulletCountField;
+        private PropertyInfo _targetBulletIdProp;
 
-        // 플레이어 인벤토리: CharacterMainControl.CharacterItem.Inventory.Content / Items / AllItems
+        // 탄종 변경용
+        private MethodInfo _getCurrentLoadedBulletMethod;
+        private MethodInfo _setTargetBulletTypeMethod;
+        private MemberInfo _preferBulletsMember;
+
+        // ─────────────────────────────────────────────
+        // 인벤토리 리플렉션
+        // ─────────────────────────────────────────────
         private bool _inventoryReflectionCached;
-        private MemberInfo _characterItemMember;     // CharacterMainControl.CharacterItem / characterItem
-        private MemberInfo _inventoryMember;         // CharacterItem.Inventory / inventory
-        private MemberInfo _inventoryContentMember;  // Inventory.Content / Items / AllItems
+        private MemberInfo _characterItemMember;
+        private MemberInfo _inventoryMember;
+        private MemberInfo _inventoryContentMember;
 
+        // ─────────────────────────────────────────────
         // HUD 값
+        // ─────────────────────────────────────────────
         private int _lastMagAmmo;
         private int _lastReserveAmmo;
         private float _lastAmmoUpdateTime;
-
-        // GUI
-        private GUIStyle _ammoStyle;
-
-        // 업데이트 간격
         private float _nextScanTime;
+
+        // ─────────────────────────────────────────────
+        // AimMarker / UI
+        // ─────────────────────────────────────────────
+        private Component _aimMarkerComponent;
+        private RectTransform _aimRight;
+        private Transform _aimMarkerUIRoot;
+        private RectTransform _ammoPanelRect;
+        private TMPro.TextMeshProUGUI _ammoText;
+        private bool _uiReady;
+        private float _nextAimSearchTime;
+
+        // 크로스헤어 기준 패널 위치
+        private float _panelOffsetX = -65f; // 너가 찾은 최적값
+        private float _panelOffsetY = 0f;
+
+        // ─────────────────────────────────────────────
+        // 리로드 상태 (gunState == 5 일 때만 떨림)
+        // ─────────────────────────────────────────────
+        private bool _reloadStateReflectionCached;
+        private FieldInfo _gunStateField;
+        private const int RELOAD_STATE_VALUE = 5; // gunState == 5 → 리로드 중
+        private bool _isReloading;
+
+        // 총 타입별 탄창 크기(최대 장전 수) - 필요하면 쓰고, 안 써도 문제 없음
+        private readonly Dictionary<int, int> _clipSizeByGunType = new Dictionary<int, int>();
+        private int _currentGunTypeId;
+
+        // ─────────────────────────────────────────────
 
         private void Awake()
         {
@@ -75,103 +125,475 @@ namespace ammocrosshairhud
 
         private void Update()
         {
-            if (Time.time < _nextScanTime)
-                return;
+            // 1) 리로드 여부만 추적 (진행도 X)
+            UpdateReloadStateSimple();
 
-            _nextScanTime = Time.time + 0.1f;
-            TryUpdateAmmo();
+            // 2) HUD 유실 체크 (맵 이동 등)
+            if (_uiReady)
+            {
+                bool lost =
+                    _aimMarkerComponent == null ||
+                    _aimMarkerUIRoot == null ||
+                    _aimRight == null ||
+                    (_ammoPanelRect != null && _ammoPanelRect.transform == null);
+
+                if (lost)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] HUD 참조 유실 감지 - 재설정 준비");
+
+                    _uiReady = false;
+                    _aimMarkerComponent = null;
+                    _aimMarkerUIRoot = null;
+                    _aimRight = null;
+                    _ammoPanelRect = null;
+                    _ammoText = null;
+                    _nextAimSearchTime = 0f;
+                }
+            }
+
+            // 3) AimMarker 기반 UI 세팅
+            if (!_uiReady && Time.time >= _nextAimSearchTime)
+            {
+                _nextAimSearchTime = Time.time + 3f;
+                TrySetupUI();
+            }
+
+            // 4) 우클릭 조준 중 Q → 탄종 변경
+            if (Input.GetMouseButton(1) && Input.GetKeyDown(KeyCode.Q))
+            {
+                object mainObjForSwitch = GetMainCharacter();
+                if (mainObjForSwitch != null)
+                {
+                    object gunObjForSwitch = GetCurrentGun(mainObjForSwitch);
+                    if (gunObjForSwitch != null && !_isReloading)
+                    {
+                        TryCycleBulletType(mainObjForSwitch, gunObjForSwitch);
+                    }
+                }
+            }
+
+            // 5) 일정 주기로 탄약 스캔
+            if (_uiReady && Time.time >= _nextScanTime)
+            {
+                _nextScanTime = Time.time + 0.10f;
+                SafeUpdateAmmo();
+            }
+
+            // 6) HUD 갱신
+            if (_uiReady && _ammoPanelRect != null && _ammoText != null)
+            {
+                UpdateAmmoUI();
+            }
         }
 
-        private void TryUpdateAmmo()
+        // ─────────────────────────────────────────────
+        // AimMarker / DistanceIndicator 기반 UI 세팅
+        // ─────────────────────────────────────────────
+        private void TrySetupUI()
         {
             try
             {
-                CharacterMainControl main = CharacterMainControl.Main;
-                if (main == null)
+                if (_uiReady)
+                    return;
+
+                GameObject hudCanvas = GameObject.Find("HUDCanvas");
+                if (hudCanvas == null)
                 {
-                    _lastAmmoUpdateTime = 0f;
+                    Debug.Log("[AmmoCrosshairHUD] HUDCanvas 를 찾지 못했습니다.");
                     return;
                 }
 
-                // 1) agentHolder 경로 캐시
+                // AimMarker 컴포넌트를 타입 이름으로 탐색
+                Component[] comps = hudCanvas.GetComponentsInChildren<Component>(true);
+                Component found = null;
+                for (int i = 0; i < comps.Length; i++)
+                {
+                    Component c = comps[i];
+                    if (c == null) continue;
+                    Type t = c.GetType();
+                    if (t != null && t.Name == "AimMarker")
+                    {
+                        found = c;
+                        break;
+                    }
+                }
+
+                if (found == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] AimMarker 컴포넌트를 찾지 못했습니다.");
+                    return;
+                }
+
+                _aimMarkerComponent = found;
+                Transform aimTr = _aimMarkerComponent.transform;
+
+                // 기존 거리 텍스트 템플릿: AimMarker/DistanceIndicator/Background/Text
+                Transform distanceTextTr = aimTr.Find("DistanceIndicator/Background/Text");
+                if (distanceTextTr == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] DistanceIndicator/Background/Text 경로를 찾지 못했습니다.");
+                    return;
+                }
+
+                RectTransform backgroundTemplate = distanceTextTr.parent as RectTransform;
+                if (backgroundTemplate == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] DistanceIndicator/Background RectTransform 을 찾지 못했습니다.");
+                    return;
+                }
+
+                // AimMarker.right, AimMarker.aimMarkerUI 리플렉션
+                Type aimType = _aimMarkerComponent.GetType();
+                BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+                object rightObj = null;
+                FieldInfo rightField = aimType.GetField("right", flags);
+                if (rightField != null)
+                {
+                    rightObj = rightField.GetValue(_aimMarkerComponent);
+                }
+                else
+                {
+                    PropertyInfo rightProp = aimType.GetProperty("right", flags) ??
+                                             aimType.GetProperty("Right", flags);
+                    if (rightProp != null)
+                        rightObj = rightProp.GetValue(_aimMarkerComponent, null);
+                }
+
+                _aimRight = rightObj as RectTransform;
+                if (_aimRight == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] AimMarker.right RectTransform 을 얻지 못했습니다.");
+                    return;
+                }
+
+                object uiRootObj = null;
+                FieldInfo uiField = aimType.GetField("aimMarkerUI", flags);
+                if (uiField != null)
+                {
+                    uiRootObj = uiField.GetValue(_aimMarkerComponent);
+                }
+                else
+                {
+                    PropertyInfo uiProp = aimType.GetProperty("aimMarkerUI", flags) ??
+                                          aimType.GetProperty("AimMarkerUI", flags);
+                    if (uiProp != null)
+                        uiRootObj = uiProp.GetValue(_aimMarkerComponent, null);
+                }
+
+                _aimMarkerUIRoot = uiRootObj as Transform;
+                if (_aimMarkerUIRoot == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] AimMarker.aimMarkerUI Transform 을 얻지 못했습니다.");
+                    return;
+                }
+
+                // 기존 거리 배경 패널 복제해서 탄약 패널로 사용
+                GameObject panelObj = UnityEngine.Object.Instantiate(
+                    backgroundTemplate.gameObject,
+                    _aimMarkerUIRoot
+                );
+
+                _ammoPanelRect = panelObj.GetComponent<RectTransform>();
+                if (_ammoPanelRect == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] 복제된 패널에 RectTransform 이 없습니다.");
+                    return;
+                }
+
+                _ammoPanelRect.name = "AmmoHUDPanel (Modded)";
+                _ammoPanelRect.anchorMin = new Vector2(0.5f, 0.5f);
+                _ammoPanelRect.anchorMax = new Vector2(0.5f, 0.5f);
+                _ammoPanelRect.pivot = new Vector2(0f, 0.5f);
+
+                Transform textChild = _ammoPanelRect.transform.Find("Text");
+                if (textChild == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] AmmoHUDPanel 내에 'Text' 자식을 찾지 못했습니다.");
+                    return;
+                }
+
+                _ammoText = textChild.GetComponent<TMPro.TextMeshProUGUI>();
+                if (_ammoText == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] AmmoHUDPanel.Text 에 TextMeshProUGUI 가 없습니다.");
+                    return;
+                }
+
+                _ammoText.text = string.Empty;
+                _ammoText.enableWordWrapping = false;
+                _ammoText.alignment = TMPro.TextAlignmentOptions.Left;
+
+                _ammoPanelRect.gameObject.SetActive(false);
+
+                _uiReady = true;
+                Debug.Log("[AmmoCrosshairHUD] AimMarker 기반 탄약 UI 설정 완료.");
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] TrySetupUI 예외: " + ex);
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 리로드 여부만 추적 (진행도 X, 떨림용)
+        // ─────────────────────────────────────────────
+        private void UpdateReloadStateSimple()
+        {
+            try
+            {
+                object mainObj = GetMainCharacter();
+                if (mainObj == null)
+                {
+                    _isReloading = false;
+                    _currentGunTypeId = 0;
+                    return;
+                }
+
+                object gunObj = GetCurrentGun(mainObj);
+                if (gunObj == null)
+                {
+                    _isReloading = false;
+                    _currentGunTypeId = 0;
+                    return;
+                }
+
+                if (!_ammoReflectionCached)
+                    CacheAmmoReflection(gunObj);
+                if (!_ammoReflectionCached)
+                    return;
+
+                _currentGunTypeId = GetGunItemTypeId(gunObj);
+
+                if (!_reloadStateReflectionCached)
+                {
+                    _reloadStateReflectionCached = true;
+
+                    Type gt = gunObj.GetType();
+                    BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+                    _gunStateField = gt.GetField("gunState", flags);
+
+                    if (_gunStateField != null)
+                    {
+                        Debug.Log("[AmmoCrosshairHUD] gunState 필드 감지: " + _gunStateField.Name);
+                    }
+                    else
+                    {
+                        Debug.Log("[AmmoCrosshairHUD] gunState 필드를 찾지 못했습니다.");
+                    }
+                }
+
+                bool nowReload = false;
+                if (_gunStateField != null)
+                {
+                    object sVal = _gunStateField.GetValue(gunObj);
+                    int gunState = Convert.ToInt32(sVal);
+                    nowReload = (gunState == RELOAD_STATE_VALUE);
+                }
+
+                _isReloading = nowReload;
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] UpdateReloadStateSimple 예외: " + ex);
+                _isReloading = false;
+            }
+        }
+
+        private int GetGunItemTypeId(object gunObj)
+        {
+            try
+            {
+                if (_gunItemProp == null)
+                    return 0;
+
+                object itemObj = _gunItemProp.GetValue(gunObj, null);
+                Item it = itemObj as Item;
+                if (it != null)
+                    return it.TypeID;
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] GetGunItemTypeId 예외: " + ex);
+            }
+            return 0;
+        }
+
+        // ─────────────────────────────────────────────
+        // HUD 숫자 갱신 (그냥 실제 값 + 리로드 중 떨림만)
+        // ─────────────────────────────────────────────
+        private void UpdateAmmoUI()
+        {
+            try
+            {
+                if (_lastAmmoUpdateTime <= 0f)
+                {
+                    if (_ammoPanelRect != null)
+                        _ammoPanelRect.gameObject.SetActive(false);
+                    return;
+                }
+
+                int showMag = _lastMagAmmo;
+                int showReserve = _lastReserveAmmo;
+
+                _ammoText.text = showMag.ToString() + " / " + showReserve.ToString();
+
+                if (_aimRight != null && _ammoPanelRect != null)
+                {
+                    Vector2 basePos = _aimRight.anchoredPosition;
+                    Vector2 pos = new Vector2(
+                        basePos.x + _panelOffsetX,
+                        basePos.y + _panelOffsetY
+                    );
+
+                    if (_isReloading)
+                    {
+                        // 리로드 중에만 살짝 흔들리게 (위치 쉐이크)
+                        float shakeAmp = 4f;
+                        float shakeFreq = 30f;
+                        float t = Time.time * shakeFreq;
+
+                        float offsetX = (Mathf.PerlinNoise(t, 0.123f) - 0.5f) * 2f * shakeAmp;
+                        float offsetY = (Mathf.PerlinNoise(0.456f, t) - 0.5f) * 2f * shakeAmp;
+
+                        pos.x += offsetX;
+                        pos.y += offsetY;
+                    }
+
+                    _ammoPanelRect.anchoredPosition = pos;
+                    _ammoPanelRect.localScale = Vector3.one;
+                    _ammoPanelRect.gameObject.SetActive(true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] UpdateAmmoUI 예외: " + ex);
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // CharacterMainControl 리플렉션
+        // ─────────────────────────────────────────────
+        private object GetMainCharacter()
+        {
+            try
+            {
+                if (_characterMainType == null || _characterMainSingletonProp == null)
+                    CacheCharacterMainReflection();
+
+                if (_characterMainSingletonProp == null)
+                    return null;
+
+                return _characterMainSingletonProp.GetValue(null, null);
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] GetMainCharacter 예외: " + ex);
+                return null;
+            }
+        }
+
+        private void CacheCharacterMainReflection()
+        {
+            try
+            {
+                Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+                for (int i = 0; i < assemblies.Length; i++)
+                {
+                    Assembly a = assemblies[i];
+                    Type[] types;
+                    try { types = a.GetTypes(); }
+                    catch { types = new Type[0]; }
+
+                    for (int j = 0; j < types.Length; j++)
+                    {
+                        Type t = types[j];
+                        if (t != null && t.Name == "CharacterMainControl")
+                        {
+                            _characterMainType = t;
+                            break;
+                        }
+                    }
+
+                    if (_characterMainType != null)
+                        break;
+                }
+
+                if (_characterMainType == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] CharacterMainControl 타입을 찾지 못했습니다.");
+                    return;
+                }
+
+                BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                _characterMainSingletonProp =
+                    _characterMainType.GetProperty("Main", flags) ??
+                    _characterMainType.GetProperty("Instance", flags) ??
+                    _characterMainType.GetProperty("instance", flags);
+
+                if (_characterMainSingletonProp == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] CharacterMainControl 메인 인스턴스 프로퍼티(Main/Instance)를 찾지 못했습니다.");
+                }
+                else
+                {
+                    Debug.Log("[AmmoCrosshairHUD] CharacterMainControl 메인 인스턴스 프로퍼티 감지: " + _characterMainSingletonProp.Name);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] CacheCharacterMainReflection 예외: " + ex);
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 현재 총 찾기
+        // ─────────────────────────────────────────────
+        private object GetCurrentGun(object mainObj)
+        {
+            try
+            {
                 if (!_holderReflectionCached)
-                    CacheHolderReflection(main);
+                    CacheHolderReflection(mainObj);
 
                 if (_agentHolderField == null && _agentHolderProp == null)
-                {
-                    _lastAmmoUpdateTime = 0f;
-                    return;
-                }
+                    return null;
 
-                // 2) agentHolder 인스턴스
-                object holderObj = GetAgentHolder(main);
+                object holderObj = GetAgentHolder(mainObj);
                 if (holderObj == null)
-                {
-                    _lastAmmoUpdateTime = 0f;
-                    return;
-                }
+                    return null;
 
-                // 3) CurrentHoldGun 멤버 캐시
                 if (_currentHoldGunMember == null)
                     CacheCurrentHoldGunMember(holderObj);
 
                 if (_currentHoldGunMember == null)
-                {
-                    _lastAmmoUpdateTime = 0f;
-                    return;
-                }
+                    return null;
 
-                // 4) 현재 들고 있는 총 객체
-                object gunObj = GetMemberValue(holderObj, _currentHoldGunMember);
-                if (gunObj == null)
-                {
-                    _lastAmmoUpdateTime = 0f;
-                    return;
-                }
-
-                // 5) 총/탄약 구조 리플렉션 경로 캐시
-                if (!_ammoReflectionCached)
-                    CacheAmmoReflection(gunObj);
-
-                if (!_ammoReflectionCached)
-                {
-                    _lastAmmoUpdateTime = 0f;
-                    return;
-                }
-
-                // 6) 장전 / 인벤 탄수 읽기
-                if (!ReadAmmoValues(main, gunObj, out int mag, out int reserve))
-                {
-                    _lastAmmoUpdateTime = 0f;
-                    return;
-                }
-
-                _lastMagAmmo = mag;
-                _lastReserveAmmo = reserve;
-                _lastAmmoUpdateTime = Time.time;
+                return GetMemberValue(holderObj, _currentHoldGunMember);
             }
             catch (Exception ex)
             {
-                Debug.Log("[AmmoCrosshairHUD] TryUpdateAmmo 예외: " + ex);
-                _lastAmmoUpdateTime = 0f;
+                Debug.Log("[AmmoCrosshairHUD] GetCurrentGun 예외: " + ex);
+                return null;
             }
         }
 
-        // ───────── CharacterMainControl → agentHolder ─────────
-
-        private void CacheHolderReflection(CharacterMainControl main)
+        private void CacheHolderReflection(object mainObj)
         {
             try
             {
-                Type t = main.GetType();
+                Type t = mainObj.GetType();
                 BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
                 _agentHolderField = t.GetField("agentHolder", flags);
                 _agentHolderProp = t.GetProperty("agentHolder", flags) ??
-                                    t.GetProperty("AgentHolder", flags);
+                                   t.GetProperty("AgentHolder", flags);
 
                 if (_agentHolderField == null && _agentHolderProp == null)
+                {
                     Debug.Log("[AmmoCrosshairHUD] agentHolder 필드를 CharacterMainControl에서 찾지 못했습니다.");
+                }
 
                 _holderReflectionCached = true;
             }
@@ -182,15 +604,15 @@ namespace ammocrosshairhud
             }
         }
 
-        private object GetAgentHolder(CharacterMainControl main)
+        private object GetAgentHolder(object mainObj)
         {
             try
             {
                 if (_agentHolderField != null)
-                    return _agentHolderField.GetValue(main);
+                    return _agentHolderField.GetValue(mainObj);
 
                 if (_agentHolderProp != null)
-                    return _agentHolderProp.GetValue(main, null);
+                    return _agentHolderProp.GetValue(mainObj, null);
             }
             catch (Exception ex)
             {
@@ -210,12 +632,14 @@ namespace ammocrosshairhud
                 PropertyInfo p = ht.GetProperty("CurrentHoldGun", flags) ??
                                  ht.GetProperty("currentHoldGun", flags);
                 FieldInfo f = ht.GetField("CurrentHoldGun", flags) ??
-                                 ht.GetField("currentHoldGun", flags);
+                              ht.GetField("currentHoldGun", flags);
 
-                _currentHoldGunMember = (MemberInfo)p ?? f;
+                _currentHoldGunMember = (MemberInfo)p ?? (MemberInfo)f;
 
                 if (_currentHoldGunMember == null)
+                {
                     Debug.Log("[AmmoCrosshairHUD] CurrentHoldGun 멤버를 agentHolder에서 찾지 못했습니다.");
+                }
             }
             catch (Exception ex)
             {
@@ -243,8 +667,33 @@ namespace ammocrosshairhud
             return null;
         }
 
-        // ───────── 총 내부 리플렉션 캐시 ─────────
+        private void SetMemberValue(object target, MemberInfo member, object value)
+        {
+            try
+            {
+                FieldInfo fi = member as FieldInfo;
+                if (fi != null)
+                {
+                    fi.SetValue(target, value);
+                    return;
+                }
 
+                PropertyInfo pi = member as PropertyInfo;
+                if (pi != null && pi.CanWrite)
+                {
+                    pi.SetValue(target, value, null);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] SetMemberValue 예외(" + member.Name + "): " + ex);
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 총/탄약 리플렉션 캐시
+        // ─────────────────────────────────────────────
         private void CacheAmmoReflection(object gunObj)
         {
             try
@@ -280,8 +729,10 @@ namespace ammocrosshairhud
                 }
 
                 _getComponentMethod = getComponentRaw.MakeGenericMethod(_itemSettingGunType);
-                _bulletCountField = _itemSettingGunType.GetField("_bulletCountCache",
-                    BindingFlags.Instance | BindingFlags.NonPublic);
+                _bulletCountField = _itemSettingGunType.GetField(
+                    "_bulletCountCache",
+                    BindingFlags.Instance | BindingFlags.NonPublic
+                );
                 _targetBulletIdProp = _itemSettingGunType.GetProperty("TargetBulletID");
 
                 if (_bulletCountField == null)
@@ -289,6 +740,28 @@ namespace ammocrosshairhud
                     Debug.Log("[AmmoCrosshairHUD] _bulletCountCache 필드를 찾지 못했습니다.");
                     return;
                 }
+
+                _getCurrentLoadedBulletMethod = _itemSettingGunType.GetMethod(
+                    "GetCurrentLoadedBullet",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, Type.EmptyTypes, null
+                );
+
+                _setTargetBulletTypeMethod = _itemSettingGunType.GetMethod(
+                    "SetTargetBulletType",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                    null, new Type[] { typeof(Item) }, null
+                );
+
+                PropertyInfo prefProp = _itemSettingGunType.GetProperty(
+                    "PreferdBulletsToLoad",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+                );
+                FieldInfo prefField = _itemSettingGunType.GetField(
+                    "PreferdBulletsToLoad",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+                );
+                _preferBulletsMember = (MemberInfo)prefProp ?? (MemberInfo)prefField;
 
                 _ammoReflectionCached = true;
                 Debug.Log("[AmmoCrosshairHUD] Ammo reflection 캐시 완료.");
@@ -309,7 +782,7 @@ namespace ammocrosshairhud
                     Assembly a = assemblies[i];
                     Type[] types;
                     try { types = a.GetTypes(); }
-                    catch { types = Array.Empty<Type>(); }
+                    catch { types = new Type[0]; }
 
                     for (int j = 0; j < types.Length; j++)
                     {
@@ -327,20 +800,20 @@ namespace ammocrosshairhud
             return null;
         }
 
-        // ───────── CharacterItem.Inventory.content 리플렉션 ─────────
-
-        private void CacheInventoryReflection(CharacterMainControl main)
+        // ─────────────────────────────────────────────
+        // 인벤토리 리플렉션
+        // ─────────────────────────────────────────────
+        private void CacheInventoryReflection(object mainObj)
         {
             try
             {
-                Type mainType = main.GetType();
+                Type mainType = mainObj.GetType();
                 BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
-                // CharacterItem
                 PropertyInfo pChar = mainType.GetProperty("CharacterItem", flags);
                 FieldInfo fChar = mainType.GetField("CharacterItem", flags) ??
-                                     mainType.GetField("characterItem", flags);
-                _characterItemMember = (MemberInfo)pChar ?? fChar;
+                                  mainType.GetField("characterItem", flags);
+                _characterItemMember = (MemberInfo)pChar ?? (MemberInfo)fChar;
 
                 if (_characterItemMember == null)
                 {
@@ -349,7 +822,7 @@ namespace ammocrosshairhud
                     return;
                 }
 
-                object charItem = GetMemberValue(main, _characterItemMember);
+                object charItem = GetMemberValue(mainObj, _characterItemMember);
                 if (charItem == null)
                 {
                     Debug.Log("[AmmoCrosshairHUD] CharacterItem 값이 null 입니다.");
@@ -357,12 +830,11 @@ namespace ammocrosshairhud
                     return;
                 }
 
-                // CharacterItem.Inventory
                 Type charItemType = charItem.GetType();
                 PropertyInfo pInv = charItemType.GetProperty("Inventory", flags);
                 FieldInfo fInv = charItemType.GetField("Inventory", flags) ??
-                                    charItemType.GetField("inventory", flags);
-                _inventoryMember = (MemberInfo)pInv ?? fInv;
+                                 charItemType.GetField("inventory", flags);
+                _inventoryMember = (MemberInfo)pInv ?? (MemberInfo)fInv;
 
                 if (_inventoryMember == null)
                 {
@@ -379,7 +851,6 @@ namespace ammocrosshairhud
                     return;
                 }
 
-                // Inventory.Content / Items / AllItems ...
                 Type invType = inventory.GetType();
                 BindingFlags invFlags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
@@ -389,12 +860,12 @@ namespace ammocrosshairhud
                                         invType.GetProperty("items", invFlags) ??
                                         invType.GetProperty("AllItems", invFlags);
                 FieldInfo fContent = invType.GetField("Content", invFlags) ??
-                                        invType.GetField("content", invFlags) ??
-                                        invType.GetField("Items", invFlags) ??
-                                        invType.GetField("items", invFlags) ??
-                                        invType.GetField("AllItems", invFlags);
+                                     invType.GetField("content", invFlags) ??
+                                     invType.GetField("Items", invFlags) ??
+                                     invType.GetField("items", invFlags) ??
+                                     invType.GetField("AllItems", invFlags);
 
-                _inventoryContentMember = (MemberInfo)pContent ?? fContent;
+                _inventoryContentMember = (MemberInfo)pContent ?? (MemberInfo)fContent;
 
                 if (_inventoryContentMember == null)
                 {
@@ -414,10 +885,10 @@ namespace ammocrosshairhud
             }
         }
 
-        private IEnumerable GetInventoryEnumerable(CharacterMainControl main)
+        private IEnumerable GetInventoryEnumerable(object mainObj)
         {
             if (!_inventoryReflectionCached)
-                CacheInventoryReflection(main);
+                CacheInventoryReflection(mainObj);
 
             if (_inventoryContentMember == null)
                 return null;
@@ -426,7 +897,7 @@ namespace ammocrosshairhud
             {
                 object charItem = null;
                 if (_characterItemMember != null)
-                    charItem = GetMemberValue(main, _characterItemMember);
+                    charItem = GetMemberValue(mainObj, _characterItemMember);
                 if (charItem == null)
                     return null;
 
@@ -446,32 +917,74 @@ namespace ammocrosshairhud
             }
         }
 
-        // ───────── 장전 / 인벤 탄 읽기 ─────────
-        //   왼쪽: _bulletCountCache (장전수)
-        //   오른쪽: CharacterItem.Inventory 안에서
-        //           TypeID == TargetBulletID 인 슬롯들의 StackCount 합계
-        private bool ReadAmmoValues(CharacterMainControl main, object gunObj, out int mag, out int reserve)
+        // ─────────────────────────────────────────────
+        // 탄약 값 스캔
+        // ─────────────────────────────────────────────
+        private void SafeUpdateAmmo()
+        {
+            object mainObj = GetMainCharacter();
+            if (mainObj == null)
+                return;
+
+            try
+            {
+                object gunObj = GetCurrentGun(mainObj);
+                if (gunObj == null)
+                {
+                    _lastAmmoUpdateTime = 0f;
+                    _isReloading = false;
+                    return;
+                }
+
+                if (!_ammoReflectionCached)
+                    CacheAmmoReflection(gunObj);
+
+                if (!_ammoReflectionCached)
+                    return;
+
+                int mag;
+                int reserve;
+                if (!ReadAmmoValues(mainObj, gunObj, out mag, out reserve))
+                    return;
+
+                _lastMagAmmo = mag;
+                _lastReserveAmmo = reserve;
+                _lastAmmoUpdateTime = Time.time;
+
+                int gunTypeId = GetGunItemTypeId(gunObj);
+                if (gunTypeId != 0)
+                {
+                    int prev;
+                    if (!_clipSizeByGunType.TryGetValue(gunTypeId, out prev) || mag > prev)
+                        _clipSizeByGunType[gunTypeId] = mag;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] SafeUpdateAmmo 예외: " + ex);
+            }
+        }
+
+        private bool ReadAmmoValues(object mainObj, object gunObj, out int mag, out int reserve)
         {
             mag = 0;
             reserve = 0;
 
             try
             {
-                object item = _gunItemProp.GetValue(gunObj, null);
-                if (item == null)
+                object itemObj = _gunItemProp.GetValue(gunObj, null);
+                if (itemObj == null)
                     return false;
 
-                object setting = _getComponentMethod.Invoke(item, null);
+                object setting = _getComponentMethod.Invoke(itemObj, null);
                 if (setting == null)
                     return false;
 
-                // 장전 탄
                 object clipVal = _bulletCountField.GetValue(setting);
                 if (clipVal != null)
                     mag = Convert.ToInt32(clipVal);
                 if (mag < 0) mag = 0;
 
-                // 탄종 ID
                 int bulletTypeId = -1;
                 if (_targetBulletIdProp != null)
                 {
@@ -482,13 +995,13 @@ namespace ammocrosshairhud
 
                 if (bulletTypeId <= 0)
                 {
-                    // 탄종 ID를 못 찾으면 장전 탄만이라도 표시
+                    // 탄종 ID를 못 읽어도 장전탄은 표시 가능
                     return true;
                 }
 
-                IEnumerable contentEnum = GetInventoryEnumerable(main);
+                IEnumerable contentEnum = GetInventoryEnumerable(mainObj);
                 if (contentEnum == null)
-                    return true; // 인벤토리 없으면 장전 탄만
+                    return true;
 
                 int total = 0;
 
@@ -497,33 +1010,14 @@ namespace ammocrosshairhud
                     if (slot == null)
                         continue;
 
-                    Type st = slot.GetType();
-                    BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
-                    PropertyInfo typeIdProp = st.GetProperty("TypeID", flags) ??
-                                              st.GetProperty("typeID", flags);
-                    PropertyInfo stackProp = st.GetProperty("StackCount", flags) ??
-                                              st.GetProperty("stackCount", flags);
-
-                    if (stackProp == null)
+                    Item it = slot as Item;
+                    if (it == null)
                         continue;
 
-                    int typeId = -1;
-                    if (typeIdProp != null)
-                    {
-                        object typeIdVal = typeIdProp.GetValue(slot, null);
-                        if (typeIdVal != null)
-                            typeId = Convert.ToInt32(typeIdVal);
-                    }
-
-                    if (typeId != bulletTypeId)
+                    if (it.TypeID != bulletTypeId)
                         continue;
 
-                    object stackVal = stackProp.GetValue(slot, null);
-                    if (stackVal == null)
-                        continue;
-
-                    int stack = Convert.ToInt32(stackVal);
+                    int stack = it.StackCount;
                     if (stack > 0)
                         total += stack;
                 }
@@ -540,71 +1034,154 @@ namespace ammocrosshairhud
             }
         }
 
-        // ───────── OnGUI ─────────
-
-        private void OnGUI()
+        // ─────────────────────────────────────────────
+        // 탄종 변경 (우클릭 조준 중 Q)
+        // ─────────────────────────────────────────────
+        private void TryCycleBulletType(object mainObj, object gunObj)
         {
-            if (Event.current.type != EventType.Repaint)
-                return;
+            try
+            {
+                if (!_ammoReflectionCached)
+                    CacheAmmoReflection(gunObj);
 
-            if (_lastAmmoUpdateTime <= 0f)
-                return;
+                if (!_ammoReflectionCached)
+                    return;
 
-            float age = Time.time - _lastAmmoUpdateTime;
-            if (age > 5f)
-                return;
+                object itemObj = _gunItemProp.GetValue(gunObj, null);
+                Item gunItem = itemObj as Item;
+                if (gunItem == null)
+                    return;
 
-            if (_ammoStyle == null)
-                SetupStyle();
+                object setting = _getComponentMethod.Invoke(itemObj, null);
+                if (setting == null)
+                    return;
 
-            string text = _lastMagAmmo.ToString() + " / " + _lastReserveAmmo.ToString();
+                IEnumerable contentEnum = GetInventoryEnumerable(mainObj);
+                if (contentEnum == null)
+                    return;
 
-            float centerX = Screen.width * 0.5f;
-            float centerY = Screen.height * 0.5f;
+                List<Item> bullets = BuildBulletList(contentEnum, gunItem);
+                if (bullets.Count == 0)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] 탄종 변경: 호환 탄약이 인벤토리에 없습니다.");
+                    return;
+                }
 
-            // 크로스헤어 기준 살짝 오른쪽/아래
-            float offsetX = 40f;
-            float offsetY = 10f;
-            float width = 140f;
-            float height = 24f;
+                int currentTypeId = -1;
+                if (_targetBulletIdProp != null)
+                {
+                    object tid = _targetBulletIdProp.GetValue(setting, null);
+                    if (tid != null)
+                        currentTypeId = Convert.ToInt32(tid);
+                }
 
-            Rect rect = new Rect(centerX + offsetX,
-                                 centerY + offsetY - height * 0.5f,
-                                 width,
-                                 height);
+                if (currentTypeId <= 0 && _getCurrentLoadedBulletMethod != null)
+                {
+                    object cb = _getCurrentLoadedBulletMethod.Invoke(setting, null);
+                    Item cbItem = cb as Item;
+                    if (cbItem != null)
+                        currentTypeId = cbItem.TypeID;
+                }
 
-            DrawLabelWithOutline(rect, text, _ammoStyle, Color.black, Color.white);
+                bullets.Sort((a, b) => a.TypeID.CompareTo(b.TypeID));
+
+                int index = 0;
+                for (int i = 0; i < bullets.Count; i++)
+                {
+                    if (bullets[i].TypeID == currentTypeId)
+                    {
+                        index = (i + 1) % bullets.Count;
+                        break;
+                    }
+                }
+
+                Item nextBullet = bullets[index];
+
+                if (_setTargetBulletTypeMethod != null)
+                {
+                    _setTargetBulletTypeMethod.Invoke(setting, new object[] { nextBullet });
+                }
+
+                if (_preferBulletsMember != null)
+                {
+                    SetMemberValue(setting, _preferBulletsMember, nextBullet);
+                }
+
+                Debug.Log("[AmmoCrosshairHUD] 탄종 변경: " + nextBullet.DisplayName + " (TypeID=" + nextBullet.TypeID + ")");
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] TryCycleBulletType 예외: " + ex);
+            }
         }
 
-        private void SetupStyle()
+        private List<Item> BuildBulletList(IEnumerable contentEnum, Item gunItem)
         {
-            _ammoStyle = new GUIStyle(GUI.skin.label);
-            _ammoStyle.fontSize = 18;
-            // TextAnchor / FontStyle 안 씀 (TextRenderingModule 참조 불필요)
-            _ammoStyle.padding = new RectOffset(4, 4, 0, 0);
-        }
+            List<Item> result = new List<Item>();
 
-        private void DrawLabelWithOutline(Rect rect, string text, GUIStyle style, Color outline, Color inner)
-        {
-            Color oldColor = GUI.color;
+            try
+            {
+                if (gunItem == null || contentEnum == null)
+                    return result;
 
-            GUI.color = outline;
+                // 총의 탄종(Caliber) 읽기
+                string caliber = null;
+                try
+                {
+                    var constants = gunItem.Constants;
+                    if (constants != null)
+                    {
+                        caliber = constants.GetString("Caliber", null);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] BuildBulletList - Caliber 읽기 예외: " + ex);
+                }
 
-            Rect r = rect;
-            r.x -= 1f;
-            GUI.Label(r, text, style);
-            r.x += 2f;
-            GUI.Label(r, text, style);
-            r.x -= 1f;
-            r.y -= 1f;
-            GUI.Label(r, text, style);
-            r.y += 2f;
-            GUI.Label(r, text, style);
+                if (string.IsNullOrEmpty(caliber))
+                    return result;
 
-            GUI.color = inner;
-            GUI.Label(rect, text, style);
+                HashSet<int> seenTypeIds = new HashSet<int>();
 
-            GUI.color = oldColor;
+                foreach (object obj in contentEnum)
+                {
+                    Item it = obj as Item;
+                    if (it == null)
+                        continue;
+
+                    bool isBullet = it.GetBool("IsBullet", false);
+                    if (!isBullet)
+                        continue;
+
+                    string bCaliber = null;
+                    try
+                    {
+                        var bConsts = it.Constants;
+                        if (bConsts != null)
+                            bCaliber = bConsts.GetString("Caliber", null);
+                    }
+                    catch { }
+
+                    if (string.IsNullOrEmpty(bCaliber) || bCaliber != caliber)
+                        continue;
+
+                    if (it.StackCount <= 0)
+                        continue;
+
+                    if (seenTypeIds.Contains(it.TypeID))
+                        continue;
+
+                    seenTypeIds.Add(it.TypeID);
+                    result.Add(it);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] BuildBulletList 예외: " + ex);
+            }
+
+            return result;
         }
     }
 }
