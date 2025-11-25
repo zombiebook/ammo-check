@@ -189,6 +189,9 @@ namespace ammocrosshairhud
         // ─────────────────────────────────────────────
         // AimMarker / DistanceIndicator 기반 UI 세팅
         // ─────────────────────────────────────────────
+        // ─────────────────────────────────────────────
+        // AimMarker / DistanceIndicator 기반 UI 세팅
+        // ─────────────────────────────────────────────
         private void TrySetupUI()
         {
             try
@@ -227,7 +230,7 @@ namespace ammocrosshairhud
                 _aimMarkerComponent = found;
                 Transform aimTr = _aimMarkerComponent.transform;
 
-                // 기존 거리 텍스트 템플릿: AimMarker/DistanceIndicator/Background/Text
+                // 기존 거리 텍스트: AimMarker/DistanceIndicator/Background/Text
                 Transform distanceTextTr = aimTr.Find("DistanceIndicator/Background/Text");
                 if (distanceTextTr == null)
                 {
@@ -235,10 +238,13 @@ namespace ammocrosshairhud
                     return;
                 }
 
+                // 거리 텍스트의 Rect / 폰트만 참고용으로 사용
                 RectTransform backgroundTemplate = distanceTextTr.parent as RectTransform;
-                if (backgroundTemplate == null)
+                TMPro.TextMeshProUGUI templateText = distanceTextTr.GetComponent<TMPro.TextMeshProUGUI>();
+
+                if (backgroundTemplate == null || templateText == null)
                 {
-                    Debug.Log("[AmmoCrosshairHUD] DistanceIndicator/Background RectTransform 을 찾지 못했습니다.");
+                    Debug.Log("[AmmoCrosshairHUD] 거리 텍스트 템플릿 정보를 읽지 못했습니다.");
                     return;
                 }
 
@@ -288,52 +294,48 @@ namespace ammocrosshairhud
                     return;
                 }
 
-                // 기존 거리 배경 패널 복제해서 탄약 패널로 사용
-                GameObject panelObj = UnityEngine.Object.Instantiate(
-                    backgroundTemplate.gameObject,
-                    _aimMarkerUIRoot
-                );
+                // ───── 여기부터: "배경 템플릿 복제" 대신 "새 패널 + 새 Text" 생성 ─────
 
-                _ammoPanelRect = panelObj.GetComponent<RectTransform>();
-                if (_ammoPanelRect == null)
-                {
-                    Debug.Log("[AmmoCrosshairHUD] 복제된 패널에 RectTransform 이 없습니다.");
-                    return;
-                }
+                // 패널 GameObject 새로 만들기 (아이콘/이미지 없음)
+                GameObject panelObj = new GameObject("AmmoHUDPanel (Modded)");
+                panelObj.transform.SetParent(_aimMarkerUIRoot, false);
 
-                _ammoPanelRect.name = "AmmoHUDPanel (Modded)";
+                _ammoPanelRect = panelObj.AddComponent<RectTransform>();
                 _ammoPanelRect.anchorMin = new Vector2(0.5f, 0.5f);
                 _ammoPanelRect.anchorMax = new Vector2(0.5f, 0.5f);
                 _ammoPanelRect.pivot = new Vector2(1f, 0.5f);
 
-                Transform textChild = _ammoPanelRect.transform.Find("Text");
-                if (textChild == null)
-                {
-                    Debug.Log("[AmmoCrosshairHUD] AmmoHUDPanel 내에 'Text' 자식을 찾지 못했습니다.");
-                    return;
-                }
+                // 거리 텍스트 배경 크기만 참고해서 사이즈 맞추기
+                _ammoPanelRect.sizeDelta = backgroundTemplate.sizeDelta;
 
-                _ammoText = textChild.GetComponent<TMPro.TextMeshProUGUI>();
-                if (_ammoText == null)
-                {
-                    Debug.Log("[AmmoCrosshairHUD] AmmoHUDPanel.Text 에 TextMeshProUGUI 가 없습니다.");
-                    return;
-                }
+                // 자식으로 Text 오브젝트 생성
+                GameObject textObj = new GameObject("Text");
+                textObj.transform.SetParent(_ammoPanelRect, false);
+                _ammoText = textObj.AddComponent<TMPro.TextMeshProUGUI>();
 
+                // 폰트/색/머티리얼은 거리 텍스트 템플릿에서 그대로 복사
+                _ammoText.font = templateText.font;
+                _ammoText.fontSize = templateText.fontSize;
+                _ammoText.color = templateText.color;
+                _ammoText.fontMaterial = templateText.fontMaterial;
+
+                // 나머지 옵션
                 _ammoText.text = string.Empty;
                 _ammoText.enableWordWrapping = false;
                 _ammoText.alignment = TMPro.TextAlignmentOptions.Left;
 
+                // 처음엔 숨겨두기
                 _ammoPanelRect.gameObject.SetActive(false);
 
                 _uiReady = true;
-                Debug.Log("[AmmoCrosshairHUD] AimMarker 기반 탄약 UI 설정 완료.");
+                Debug.Log("[AmmoCrosshairHUD] AimMarker 기반 탄약 UI 설정 완료(아이콘 없이 폰트만 복사).");
             }
             catch (Exception ex)
             {
                 Debug.Log("[AmmoCrosshairHUD] TrySetupUI 예외: " + ex);
             }
         }
+
 
         // ─────────────────────────────────────────────
         // 리로드 여부만 추적 (진행도 X, 떨림용)
