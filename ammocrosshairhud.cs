@@ -92,7 +92,7 @@ namespace ammocrosshairhud
         private float _nextAimSearchTime;
 
         // 크로스헤어 기준 패널 위치
-        private float _panelOffsetX = -65f; // 너가 찾은 최적값
+        private float _panelOffsetX = 160f; // 너가 찾은 최적값
         private float _panelOffsetY = 0f;
 
         // ─────────────────────────────────────────────
@@ -304,7 +304,7 @@ namespace ammocrosshairhud
                 _ammoPanelRect.name = "AmmoHUDPanel (Modded)";
                 _ammoPanelRect.anchorMin = new Vector2(0.5f, 0.5f);
                 _ammoPanelRect.anchorMax = new Vector2(0.5f, 0.5f);
-                _ammoPanelRect.pivot = new Vector2(0f, 0.5f);
+                _ammoPanelRect.pivot = new Vector2(1f, 0.5f);
 
                 Transform textChild = _ammoPanelRect.transform.Find("Text");
                 if (textChild == null)
