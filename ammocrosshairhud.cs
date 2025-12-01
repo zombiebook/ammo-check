@@ -106,7 +106,13 @@ namespace ammocrosshairhud
         // 총 타입별 탄창 크기(최대 장전 수) - 필요하면 쓰고, 안 써도 문제 없음
         private readonly Dictionary<int, int> _clipSizeByGunType = new Dictionary<int, int>();
         private int _currentGunTypeId;
+        // 크로스헤어 기준 패널 위치
+        private float panelOffsetX = 160f; // 너가 찾은 최적값
+        private float panelOffsetY = 0f;
 
+        // 장전 탄수 색상 임계값
+        private const float LOW_AMMO_RATIO = 0.3f;  // 30% 이하면 빨간색
+        private const float MID_AMMO_RATIO = 0.7f;  // 30~70% 노란색
         // ─────────────────────────────────────────────
 
         private void Awake()
@@ -425,6 +431,9 @@ namespace ammocrosshairhud
         // ─────────────────────────────────────────────
         // HUD 숫자 갱신 (그냥 실제 값 + 리로드 중 떨림만)
         // ─────────────────────────────────────────────
+        // ─────────────────────────────────────────────
+        // HUD 숫자 갱신 (그냥 실제 값 + 리로드 중 떨림만)
+        // ─────────────────────────────────────────────
         private void UpdateAmmoUI()
         {
             try
@@ -439,8 +448,36 @@ namespace ammocrosshairhud
                 int showMag = _lastMagAmmo;
                 int showReserve = _lastReserveAmmo;
 
+                // ── 장전 탄 비율에 따라 색상 결정 ──
+                Color ammoColor = Color.white;
+
+                // 현재 무기 타입 기준으로 최대 장탄 수 추정
+                int maxMag = 0;
+                if (_currentGunTypeId != 0)
+                {
+                    _clipSizeByGunType.TryGetValue(_currentGunTypeId, out maxMag);
+                }
+
+                // 아직 기록된 장탄 수가 없다면 현재 값 기준으로 처리
+                if (maxMag <= 0)
+                    maxMag = showMag;
+
+                if (maxMag > 0)
+                {
+                    float ratio = (float)showMag / (float)maxMag; // 0~1
+
+                    if (ratio <= LOW_AMMO_RATIO)
+                        ammoColor = Color.red;        // 낮음
+                    else if (ratio <= MID_AMMO_RATIO)
+                        ammoColor = Color.yellow;     // 중간
+                    else
+                        ammoColor = Color.white;      // 많음
+                }
+
+                _ammoText.color = ammoColor;
                 _ammoText.text = showMag.ToString() + " / " + showReserve.ToString();
 
+                // ── 패널 위치/떨림 처리 ──
                 if (_aimRight != null && _ammoPanelRect != null)
                 {
                     Vector2 basePos = _aimRight.anchoredPosition;
@@ -473,6 +510,7 @@ namespace ammocrosshairhud
                 Debug.Log("[AmmoCrosshairHUD] UpdateAmmoUI 예외: " + ex);
             }
         }
+
 
         // ─────────────────────────────────────────────
         // CharacterMainControl 리플렉션
