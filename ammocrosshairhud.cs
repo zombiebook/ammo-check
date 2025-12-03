@@ -5,10 +5,11 @@ using System.Linq;
 using System.Reflection;
 using ItemStatsSystem;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace ammocrosshairhud
 {
-    // Duckov 모드 로더가 찾는 엔트리 타입
+    // Duckov 모드 로더 엔트리
     public class ModBehaviour : Duckov.Modding.ModBehaviour
     {
         protected override void OnAfterSetup()
@@ -23,7 +24,7 @@ namespace ammocrosshairhud
             }
             catch (Exception ex)
             {
-                Debug.Log("[AmmoCrosshairHUD] ModBehaviour.OnAfterSetup 예외: " + ex);
+                Debug.Log("[AmmoCrosshairHUD] OnAfterSetup 예외: " + ex);
             }
         }
 
@@ -91,28 +92,39 @@ namespace ammocrosshairhud
         private bool _uiReady;
         private float _nextAimSearchTime;
 
-        // 크로스헤어 기준 패널 위치
+        // 크로스헤어 기준 패널 위치 (탄약 숫자)
         private float _panelOffsetX = 160f; // 너가 찾은 최적값
-        private float _panelOffsetY = 0f;
+        private float _panelOffsetY = 40f;
 
         // ─────────────────────────────────────────────
         // 리로드 상태 (gunState == 5 일 때만 떨림)
         // ─────────────────────────────────────────────
         private bool _reloadStateReflectionCached;
         private FieldInfo _gunStateField;
-        private const int RELOAD_STATE_VALUE = 5; // gunState == 5 → 리로드 중
+        private const int RELOAD_STATE_VALUE = 5;
         private bool _isReloading;
 
-        // 총 타입별 탄창 크기(최대 장전 수) - 필요하면 쓰고, 안 써도 문제 없음
+        // 총 타입별 탄창 크기(최대 장전 수)
         private readonly Dictionary<int, int> _clipSizeByGunType = new Dictionary<int, int>();
         private int _currentGunTypeId;
-        // 크로스헤어 기준 패널 위치
-        private float panelOffsetX = 160f; // 너가 찾은 최적값
-        private float panelOffsetY = 0f;
 
-        // 장전 탄수 색상 임계값
-        private const float LOW_AMMO_RATIO = 0.3f;  // 30% 이하면 빨간색
-        private const float MID_AMMO_RATIO = 0.7f;  // 30~70% 노란색
+        // ─────────────────────────────────────────────
+        // 커스텀 크로스헤어
+        // ─────────────────────────────────────────────
+        private RectTransform _customCrosshairRoot;
+        private List<Image> _customCrosshairImages = new List<Image>();
+        private float _customCrosshairScale = 2.0f;
+        private Vector2 _customCrosshairOffset = Vector2.zero; // AimMarker 기준 그대로 위치
+
+        private readonly List<Graphic> _originalCrosshairGraphics = new List<Graphic>();
+
+        // ─────────────────────────────────────────────
+        // 거리 기반 색 변경
+        // ─────────────────────────────────────────────
+        private bool _aimExtraReflectionCached;
+        private MemberInfo _currentAimDirectionMember;
+        private float _currentAimDistance = -1f;
+
         // ─────────────────────────────────────────────
 
         private void Awake()
@@ -131,7 +143,7 @@ namespace ammocrosshairhud
 
         private void Update()
         {
-            // 1) 리로드 여부만 추적 (진행도 X)
+            // 1) 리로드 여부 추적
             UpdateReloadStateSimple();
 
             // 2) HUD 유실 체크 (맵 이동 등)
@@ -153,6 +165,12 @@ namespace ammocrosshairhud
                     _aimRight = null;
                     _ammoPanelRect = null;
                     _ammoText = null;
+                    _customCrosshairRoot = null;
+                    _customCrosshairImages.Clear();
+                    _originalCrosshairGraphics.Clear();
+                    _aimExtraReflectionCached = false;
+                    _currentAimDirectionMember = null;
+                    _currentAimDistance = -1f;
                     _nextAimSearchTime = 0f;
                 }
             }
@@ -185,16 +203,23 @@ namespace ammocrosshairhud
                 SafeUpdateAmmo();
             }
 
-            // 6) HUD 갱신
-            if (_uiReady && _ammoPanelRect != null && _ammoText != null)
+            // 6) HUD 갱신 + 거리 기반 색 변경
+            if (_uiReady)
             {
-                UpdateAmmoUI();
+                if (_ammoPanelRect != null && _ammoText != null)
+                {
+                    UpdateAmmoUI();
+                }
+
+                if (_customCrosshairRoot != null)
+                {
+                    UpdateCustomCrosshairPosition();
+                }
+
+                UpdateAimDistanceColor();
             }
         }
 
-        // ─────────────────────────────────────────────
-        // AimMarker / DistanceIndicator 기반 UI 세팅
-        // ─────────────────────────────────────────────
         // ─────────────────────────────────────────────
         // AimMarker / DistanceIndicator 기반 UI 세팅
         // ─────────────────────────────────────────────
@@ -236,7 +261,7 @@ namespace ammocrosshairhud
                 _aimMarkerComponent = found;
                 Transform aimTr = _aimMarkerComponent.transform;
 
-                // 기존 거리 텍스트: AimMarker/DistanceIndicator/Background/Text
+                // 기존 거리 텍스트 템플릿: AimMarker/DistanceIndicator/Background/Text
                 Transform distanceTextTr = aimTr.Find("DistanceIndicator/Background/Text");
                 if (distanceTextTr == null)
                 {
@@ -244,13 +269,10 @@ namespace ammocrosshairhud
                     return;
                 }
 
-                // 거리 텍스트의 Rect / 폰트만 참고용으로 사용
                 RectTransform backgroundTemplate = distanceTextTr.parent as RectTransform;
-                TMPro.TextMeshProUGUI templateText = distanceTextTr.GetComponent<TMPro.TextMeshProUGUI>();
-
-                if (backgroundTemplate == null || templateText == null)
+                if (backgroundTemplate == null)
                 {
-                    Debug.Log("[AmmoCrosshairHUD] 거리 텍스트 템플릿 정보를 읽지 못했습니다.");
+                    Debug.Log("[AmmoCrosshairHUD] DistanceIndicator/Background RectTransform 을 찾지 못했습니다.");
                     return;
                 }
 
@@ -300,41 +322,58 @@ namespace ammocrosshairhud
                     return;
                 }
 
-                // ───── 여기부터: "배경 템플릿 복제" 대신 "새 패널 + 새 Text" 생성 ─────
+                // ─────────────────────────────────────
+                // 탄약 패널 생성 (Distance 배경 복제)
+                // ─────────────────────────────────────
+                GameObject panelObj = UnityEngine.Object.Instantiate(
+                    backgroundTemplate.gameObject,
+                    _aimMarkerUIRoot
+                );
 
-                // 패널 GameObject 새로 만들기 (아이콘/이미지 없음)
-                GameObject panelObj = new GameObject("AmmoHUDPanel (Modded)");
-                panelObj.transform.SetParent(_aimMarkerUIRoot, false);
+                _ammoPanelRect = panelObj.GetComponent<RectTransform>();
+                if (_ammoPanelRect == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] 복제된 패널에 RectTransform 이 없습니다.");
+                    return;
+                }
 
-                _ammoPanelRect = panelObj.AddComponent<RectTransform>();
+                _ammoPanelRect.name = "AmmoHUDPanel (Modded)";
                 _ammoPanelRect.anchorMin = new Vector2(0.5f, 0.5f);
                 _ammoPanelRect.anchorMax = new Vector2(0.5f, 0.5f);
                 _ammoPanelRect.pivot = new Vector2(1f, 0.5f);
 
-                // 거리 텍스트 배경 크기만 참고해서 사이즈 맞추기
-                _ammoPanelRect.sizeDelta = backgroundTemplate.sizeDelta;
+                Transform textChild = _ammoPanelRect.transform.Find("Text");
+                if (textChild == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] AmmoHUDPanel 내에 'Text' 자식을 찾지 못했습니다.");
+                    return;
+                }
 
-                // 자식으로 Text 오브젝트 생성
-                GameObject textObj = new GameObject("Text");
-                textObj.transform.SetParent(_ammoPanelRect, false);
-                _ammoText = textObj.AddComponent<TMPro.TextMeshProUGUI>();
+                _ammoText = textChild.GetComponent<TMPro.TextMeshProUGUI>();
+                if (_ammoText == null)
+                {
+                    Debug.Log("[AmmoCrosshairHUD] AmmoHUDPanel.Text 에 TextMeshProUGUI 가 없습니다.");
+                    return;
+                }
 
-                // 폰트/색/머티리얼은 거리 텍스트 템플릿에서 그대로 복사
-                _ammoText.font = templateText.font;
-                _ammoText.fontSize = templateText.fontSize;
-                _ammoText.color = templateText.color;
-                _ammoText.fontMaterial = templateText.fontMaterial;
-
-                // 나머지 옵션
                 _ammoText.text = string.Empty;
                 _ammoText.enableWordWrapping = false;
                 _ammoText.alignment = TMPro.TextAlignmentOptions.Left;
 
-                // 처음엔 숨겨두기
                 _ammoPanelRect.gameObject.SetActive(false);
 
+                // ─────────────────────────────────────
+                // 커스텀 크로스헤어 생성
+                // ─────────────────────────────────────
+                CreateCustomCrosshairRoot();
+
+                // ─────────────────────────────────────
+                // 기존 AimMarker 크로스헤어 그래픽 숨김
+                // ─────────────────────────────────────
+                HideOriginalCrosshairGraphics();
+
                 _uiReady = true;
-                Debug.Log("[AmmoCrosshairHUD] AimMarker 기반 탄약 UI 설정 완료(아이콘 없이 폰트만 복사).");
+                Debug.Log("[AmmoCrosshairHUD] AimMarker 기반 탄약/크로스헤어 UI 설정 완료.");
             }
             catch (Exception ex)
             {
@@ -342,9 +381,261 @@ namespace ammocrosshairhud
             }
         }
 
+        // ─────────────────────────────────────────────
+        // 커스텀 크로스헤어 생성/위치/색상
+        // ─────────────────────────────────────────────
+        private void CreateCustomCrosshairRoot()
+        {
+            try
+            {
+                if (_customCrosshairRoot != null)
+                    return;
+                if (_aimMarkerUIRoot == null)
+                    return;
+
+                GameObject rootObj = new GameObject("CustomCrosshairRoot", typeof(RectTransform));
+                _customCrosshairRoot = rootObj.GetComponent<RectTransform>();
+                _customCrosshairRoot.SetParent(_aimMarkerUIRoot, false);
+                _customCrosshairRoot.anchorMin = new Vector2(0.5f, 0.5f);
+                _customCrosshairRoot.anchorMax = new Vector2(0.5f, 0.5f);
+                _customCrosshairRoot.pivot = new Vector2(0.5f, 0.5f);
+                _customCrosshairRoot.sizeDelta = new Vector2(32f, 32f);
+                _customCrosshairRoot.localScale = Vector3.one * _customCrosshairScale;
+
+                _customCrosshairImages = new List<Image>();
+
+                // 4갈래 십자선
+                CreateCrosshairLine(new Vector2(-8f, 0f), new Vector2(-24f, 0f));  // 좌
+                CreateCrosshairLine(new Vector2(8f, 0f), new Vector2(24f, 0f));    // 우
+                CreateCrosshairLine(new Vector2(0f, 8f), new Vector2(0f, 24f));    // 위
+                CreateCrosshairLine(new Vector2(0f, -8f), new Vector2(0f, -24f));  // 아래
+
+                ApplyCrosshairColor(Color.green);
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] CreateCustomCrosshairRoot 예외: " + ex);
+            }
+        }
+
+        private void CreateCrosshairLine(Vector2 inner, Vector2 outer)
+        {
+            if (_customCrosshairRoot == null)
+                return;
+
+            GameObject go = new GameObject("CrosshairLine", typeof(RectTransform), typeof(Image));
+            RectTransform rect = go.GetComponent<RectTransform>();
+            rect.SetParent(_customCrosshairRoot, false);
+            rect.anchorMin = new Vector2(0.5f, 0.5f);
+            rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+
+            Vector2 dir = (outer - inner);
+            float length = dir.magnitude;
+            rect.sizeDelta = new Vector2(2f, length);
+
+            float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg - 90f;
+            rect.localRotation = Quaternion.Euler(0f, 0f, angle);
+            rect.anchoredPosition = (inner + outer) * 0.5f;
+
+            Image img = go.GetComponent<Image>();
+            img.color = Color.green;
+            img.raycastTarget = false;
+
+            _customCrosshairImages.Add(img);
+        }
+
+        private void UpdateCustomCrosshairPosition()
+        {
+            if (_customCrosshairRoot == null)
+                return;
+
+            // AimMarkerUI 루트의 정중앙 = 원래 크로스헤어 위치
+            // _customCrosshairOffset 으로 미세 조정할 수 있음(지금은 (0,0))
+            _customCrosshairRoot.anchoredPosition = _customCrosshairOffset;
+            _customCrosshairRoot.localScale = Vector3.one * _customCrosshairScale;
+        }
+
+
+        private void HideOriginalCrosshairGraphics()
+        {
+            try
+            {
+                _originalCrosshairGraphics.Clear();
+
+                if (_aimMarkerUIRoot == null)
+                    return;
+
+                Graphic[] graphics = _aimMarkerUIRoot.GetComponentsInChildren<Graphic>(true);
+                for (int i = 0; i < graphics.Length; i++)
+                {
+                    Graphic g = graphics[i];
+                    if (g == null) continue;
+
+                    // 우리 탄약 패널/텍스트는 제외
+                    if (_ammoPanelRect != null &&
+                        (g.gameObject == _ammoPanelRect.gameObject ||
+                         g.transform.IsChildOf(_ammoPanelRect.transform)))
+                        continue;
+
+                    // 커스텀 크로스헤어 선들도 제외
+                    if (_customCrosshairImages != null && _customCrosshairImages.Contains(g as Image))
+                        continue;
+
+                    g.enabled = false;
+                    _originalCrosshairGraphics.Add(g);
+                }
+
+                Debug.Log("[AmmoCrosshairHUD] 기존 AimMarker 크로스헤어 그래픽 숨김: " + _originalCrosshairGraphics.Count);
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] HideOriginalCrosshairGraphics 예외: " + ex);
+            }
+        }
+
+        private void ApplyCrosshairColor(Color col)
+        {
+            if (_customCrosshairImages == null)
+                return;
+
+            for (int i = 0; i < _customCrosshairImages.Count; i++)
+            {
+                var img = _customCrosshairImages[i];
+                if (img != null)
+                {
+                    img.color = col;
+                }
+            }
+        }
 
         // ─────────────────────────────────────────────
-        // 리로드 여부만 추적 (진행도 X, 떨림용)
+        // 거리 계산 + 색 변경 (1~9 초록, 10~17 노랑, 18↑ 빨강)
+        // ─────────────────────────────────────────────
+        private void CacheAimReflection(object mainObj)
+        {
+            try
+            {
+                Type t = mainObj.GetType();
+                BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+                PropertyInfo pDir = t.GetProperty("CurrentAimDirection", flags) ??
+                                    t.GetProperty("currentAimDirection", flags);
+                FieldInfo fDir = t.GetField("CurrentAimDirection", flags) ??
+                                 t.GetField("currentAimDirection", flags);
+
+                _currentAimDirectionMember = (MemberInfo)pDir ?? (MemberInfo)fDir;
+
+                if (_currentAimDirectionMember == null)
+                    Debug.Log("[AmmoCrosshairHUD] CurrentAimDirection 멤버를 CharacterMainControl에서 찾지 못했습니다.");
+                else
+                    Debug.Log("[AmmoCrosshairHUD] CurrentAimDirection 멤버 감지: " + _currentAimDirectionMember.Name);
+
+                _aimExtraReflectionCached = true;
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] CacheAimReflection 예외: " + ex);
+                _aimExtraReflectionCached = true;
+            }
+        }
+
+        private Vector3 GetCurrentAimDirection(object mainObj)
+        {
+            try
+            {
+                if (!_aimExtraReflectionCached)
+                    CacheAimReflection(mainObj);
+
+                if (_currentAimDirectionMember == null)
+                    return Vector3.zero;
+
+                object dirObj = GetMemberValue(mainObj, _currentAimDirectionMember);
+                if (dirObj is Vector3 v)
+                    return v;
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] GetCurrentAimDirection 예외: " + ex);
+            }
+            return Vector3.zero;
+        }
+
+        private void UpdateAimDistanceColor()
+        {
+            try
+            {
+                if (_customCrosshairImages == null || _customCrosshairImages.Count == 0)
+                    return;
+
+                object mainObj = GetMainCharacter();
+                if (mainObj == null)
+                {
+                    _currentAimDistance = -1f;
+                    ApplyCrosshairColor(Color.green);
+                    return;
+                }
+
+                // 총을 들고 있을 때만
+                object gunObj = GetCurrentGun(mainObj);
+                if (gunObj == null)
+                {
+                    _currentAimDistance = -1f;
+                    ApplyCrosshairColor(Color.green);
+                    return;
+                }
+
+                Vector3 dir = GetCurrentAimDirection(mainObj);
+                if (dir.sqrMagnitude < 0.0001f)
+                {
+                    _currentAimDistance = -1f;
+                    ApplyCrosshairColor(Color.green);
+                    return;
+                }
+                dir.Normalize();
+
+                Component mainComp = mainObj as Component;
+                if (mainComp == null)
+                {
+                    _currentAimDistance = -1f;
+                    ApplyCrosshairColor(Color.green);
+                    return;
+                }
+
+                Vector3 origin = mainComp.transform.position + Vector3.up * 1.4f; // 대략 눈높이
+                float maxDistance = 100f;
+                RaycastHit hit;
+                float dist;
+
+                if (Physics.Raycast(origin, dir, out hit, maxDistance))
+                {
+                    dist = hit.distance;
+                }
+                else
+                {
+                    dist = maxDistance;
+                }
+
+                _currentAimDistance = dist;
+
+                Color col;
+                if (dist <= 9f)
+                    col = Color.green;
+                else if (dist <= 17f)
+                    col = Color.yellow;
+                else
+                    col = Color.red;
+
+                ApplyCrosshairColor(col);
+            }
+            catch (Exception ex)
+            {
+                Debug.Log("[AmmoCrosshairHUD] UpdateAimDistanceColor 예외: " + ex);
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // 리로드 여부 추적 (gunState == 5)
         // ─────────────────────────────────────────────
         private void UpdateReloadStateSimple()
         {
@@ -429,10 +720,7 @@ namespace ammocrosshairhud
         }
 
         // ─────────────────────────────────────────────
-        // HUD 숫자 갱신 (그냥 실제 값 + 리로드 중 떨림만)
-        // ─────────────────────────────────────────────
-        // ─────────────────────────────────────────────
-        // HUD 숫자 갱신 (그냥 실제 값 + 리로드 중 떨림만)
+        // HUD 숫자 갱신 (실제 값 + 리로드 중 떨림)
         // ─────────────────────────────────────────────
         private void UpdateAmmoUI()
         {
@@ -448,69 +736,64 @@ namespace ammocrosshairhud
                 int showMag = _lastMagAmmo;
                 int showReserve = _lastReserveAmmo;
 
-                // ── 장전 탄 비율에 따라 색상 결정 ──
+                // 장전탄 수에 따른 색 변경
                 Color ammoColor = Color.white;
-
-                // 현재 무기 타입 기준으로 최대 장탄 수 추정
-                int maxMag = 0;
-                if (_currentGunTypeId != 0)
+                if (showMag <= 0)
                 {
-                    _clipSizeByGunType.TryGetValue(_currentGunTypeId, out maxMag);
+                    ammoColor = Color.red;
                 }
-
-                // 아직 기록된 장탄 수가 없다면 현재 값 기준으로 처리
-                if (maxMag <= 0)
-                    maxMag = showMag;
-
-                if (maxMag > 0)
+                else if (_currentGunTypeId != 0)
                 {
-                    float ratio = (float)showMag / (float)maxMag; // 0~1
-
-                    if (ratio <= LOW_AMMO_RATIO)
-                        ammoColor = Color.red;        // 낮음
-                    else if (ratio <= MID_AMMO_RATIO)
-                        ammoColor = Color.yellow;     // 중간
-                    else
-                        ammoColor = Color.white;      // 많음
+                    int maxClip;
+                    if (_clipSizeByGunType.TryGetValue(_currentGunTypeId, out maxClip) && maxClip > 0)
+                    {
+                        float ratio = (float)showMag / maxClip;
+                        if (ratio <= 0.25f)
+                            ammoColor = Color.red;
+                        else if (ratio <= 0.6f)
+                            ammoColor = Color.yellow;
+                        else
+                            ammoColor = Color.white;
+                    }
                 }
-
                 _ammoText.color = ammoColor;
+
                 _ammoText.text = showMag.ToString() + " / " + showReserve.ToString();
 
-                // ── 패널 위치/떨림 처리 ──
-                if (_aimRight != null && _ammoPanelRect != null)
-                {
-                    Vector2 basePos = _aimRight.anchoredPosition;
-                    Vector2 pos = new Vector2(
-                        basePos.x + _panelOffsetX,
-                        basePos.y + _panelOffsetY
-                    );
+                if (_ammoPanelRect != null)
+{
+    // 화면 중앙(크로스헤어 중심) 기준으로 오른쪽에 살짝 띄우기
+    Vector2 basePos = Vector2.zero;
+    Vector2 pos = new Vector2(
+        basePos.x + _panelOffsetX,
+        basePos.y + _panelOffsetY
+    );
 
-                    if (_isReloading)
-                    {
-                        // 리로드 중에만 살짝 흔들리게 (위치 쉐이크)
-                        float shakeAmp = 4f;
-                        float shakeFreq = 30f;
-                        float t = Time.time * shakeFreq;
+    if (_isReloading)
+    {
+        // 리로드 중에만 살짝 흔들리게 (위치 쉐이크)
+        float shakeAmp = 4f;
+        float shakeFreq = 30f;
+        float t = Time.time * shakeFreq;
 
-                        float offsetX = (Mathf.PerlinNoise(t, 0.123f) - 0.5f) * 2f * shakeAmp;
-                        float offsetY = (Mathf.PerlinNoise(0.456f, t) - 0.5f) * 2f * shakeAmp;
+        float offsetX = (Mathf.PerlinNoise(t, 0.123f) - 0.5f) * 2f * shakeAmp;
+        float offsetY = (Mathf.PerlinNoise(0.456f, t) - 0.5f) * 2f * shakeAmp;
 
-                        pos.x += offsetX;
-                        pos.y += offsetY;
-                    }
+        pos.x += offsetX;
+        pos.y += offsetY;
+    }
 
-                    _ammoPanelRect.anchoredPosition = pos;
-                    _ammoPanelRect.localScale = Vector3.one;
-                    _ammoPanelRect.gameObject.SetActive(true);
-                }
+    _ammoPanelRect.anchoredPosition = pos;
+    _ammoPanelRect.localScale = Vector3.one;
+    _ammoPanelRect.gameObject.SetActive(true);
+}
+
             }
             catch (Exception ex)
             {
                 Debug.Log("[AmmoCrosshairHUD] UpdateAmmoUI 예외: " + ex);
             }
         }
-
 
         // ─────────────────────────────────────────────
         // CharacterMainControl 리플렉션
